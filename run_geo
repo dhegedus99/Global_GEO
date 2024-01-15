@@ -19,5 +19,7 @@ outdir_top=/gws/pw/j07/rsg_share/public/nrt/nrt_imagery_geo_global/quick_look_ce
 cachedir=/work/scratch-nopw2/$USER/tmp/
 tmpdir=/work/scratch-nopw2/$USER/tmp/
 idir_top=/work/scratch-nopw2/$USER/global_geo/
+dtstr="" #datetime in format "%Y%m%d%H%M"
+echo "dtstr" $dtstr
 
-python Global_GEO.py --outdir_top=$outdir_top --idir_top=$idir_top --tmpdir=$tmpdir --cachedir=$cachedir
+python Global_GEO.py --outdir_top=$outdir_top --idir_top=$idir_top --tmpdir=$tmpdir --cachedir=$cachedir $dtstr

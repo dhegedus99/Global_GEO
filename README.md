@@ -9,16 +9,18 @@ The global geo composite creator requires a python virtual environment,
 which holds all necessary libraries. It also requires the xRITDecompress 
 binary from EUMETSAT to read in the SEVIRI dataset.
 
-Run:
+To set up the virtual environment and get the binary, run:
 ```
 bash config.sh
 ```
 
 Then navigate into the EUMETSAT repo, e.g.:
+```
 cd /home/users/$USER/bin/PublicDecompWT/xRITDecompress
+```
 
 Edit the Makefile:
-line 6: DEST_DIR=/home/users/$(USER)
+line 6: ```DEST_DIR=/home/users/$(USER)```
 line 20-21: comment out
 
 Run to compile the xRITDecompress binary (we will need this path in the ./run_geo script):

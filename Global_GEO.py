@@ -1,17 +1,30 @@
 from datetime import datetime, timedelta  # noqa: E402
-import os  # noqa: E402
+import os, stat  # noqa: E402
 import utils  # noqa: E402
 import sys  # noqa: E402
-
-os.environ['XRIT_DECOMPRESS_PATH'] = '/gws/smf/j04/nceo_generic/Software/miniconda3/bin/xRITDecompress'
-
+from getopt import getopt
+import matplotlib.pyplot as plt
+import numpy as np
 import warnings  # noqa: E402
 warnings.filterwarnings('ignore')
 
-if len(sys.argv) < 2:
+
+options, operands = getopt(sys.argv[1:], "", ["outdir_top=", "idir_top=", "tmpdir=", "cachedir="])
+for o,v in options:
+    if o == "--outdir_top":
+        topdir_remote = v
+    if o == "--idir_top":
+        idir_top = v
+    if o == "--tmpdir":
+        tmpdir = v
+    if o == "--cachedir":
+        cachedir = v
+        
+
+if len(sys.argv) < 6:
     proc_dt = datetime.utcnow().replace(microsecond=0, second=0, minute=0)
 else:
-    dtstr = sys.argv[1]
+    dtstr = sys.argv[-1]
     try:
         proc_dt = datetime.strptime(dtstr, "%Y%m%d%H%M")
     except ValueError:
@@ -20,8 +33,7 @@ else:
 timedelt = timedelta(hours=1)
 
 # Remote directory into which output data will be saved.
-topdir_remote = '/gws/pw/j07/rsg_share/public/nrt/nrt_imagery_geo_global/quick_look_cesium/'
-
+#topdir_remote = '/gws/pw/j07/rsg_share/public/nrt/nrt_imagery_geo_global/quick_look_cesium/'
 print("Processing:", proc_dt)
 
 # view zenith angle limits. Data not produced above these
@@ -46,6 +58,7 @@ processes = 7
 
 # This is the output file on the public folder for use by the VIS tool
 output_dir_rsg = f'{topdir_remote}/{proc_dt.strftime("%Y/%m/%d")}/GLOBAL_GEO_{proc_dt.strftime("%Y%m%d%H%M")}_V1_00_FC/'
+os.makedirs(output_dir_rsg, exist_ok=True)
 
 # Check that the files don't already exist, to save unnecessary reprocessing.
 if os.path.exists(output_dir_rsg):
@@ -62,15 +75,15 @@ if utils.totfiles(output_dir_rsg) < expected_fnum:
     import subprocess  # noqa: E402
     import shutil  # noqa: E402
 
-    dirs = utils.DirStruct()
-
+    dirs = utils.DirStruct(tmpdir=tmpdir, cachedir=cachedir, idir_top=idir_top)
+    
     import satpy
     # Set some satpy options to defaults.
     satpy.config.set(cache_dir=dirs.cache_dir)
     satpy.config.set(tmp_dir=dirs.idir_tmp)
     satpy.config.set(cache_lonlats=True)
     satpy.config.set(cache_sensor_angles=True)
-    satpy.config.set(tmp_dir=dirs.tmp_dir)
+    #satpy.config.set(tmp_dir=dirs.tmpdir)
 
 
     proj_str, extent, targ_srs = utils.setup_global_area(res=0.03)
@@ -92,6 +105,7 @@ if utils.totfiles(output_dir_rsg) < expected_fnum:
     else:
         # Load data
         try:
+            return_dict= {}
             manager = mp.Manager()
             return_dict = manager.dict()
             jobs = []
@@ -120,21 +134,20 @@ if utils.totfiles(output_dir_rsg) < expected_fnum:
             for proc in jobs:
                 proc.join()
 
-
             # Get the individual datasets
             fds_rgb, fds_vza, gt, sr = return_dict['fds']
             ioc_rgb, ioc_vza, gt, sr = return_dict['ioc']
             g16_rgb, g16_vza, gt, sr = return_dict['goes16']
             g17_rgb, g17_vza, gt, sr = return_dict['goes18']
             hi8_rgb, hi8_vza, gt, sr = return_dict['hi8']
-
+            print('data read in')
             # Remove NaNs from datasets
             ioc_rgb = utils.remove_baddata_rgb(ioc_rgb, minthresh=min_refl, maxthresh=max_refl)
             fds_rgb = utils.remove_baddata_rgb(fds_rgb, minthresh=min_refl, maxthresh=max_refl)
             g16_rgb = utils.remove_baddata_rgb(g16_rgb, minthresh=min_refl, maxthresh=max_refl)
             g17_rgb = utils.remove_baddata_rgb(g17_rgb, minthresh=min_refl, maxthresh=max_refl)
             hi8_rgb = utils.remove_baddata_rgb(hi8_rgb, minthresh=min_refl, maxthresh=max_refl)
-
+            
             # Compute which satellite is best to use at a given location
             # First, create a stacked array with all the VZAs
             all_vza = np.dstack((ioc_vza, fds_vza, g16_vza, g17_vza, hi8_vza))
@@ -150,6 +163,12 @@ if utils.totfiles(output_dir_rsg) < expected_fnum:
 
             # Compute fraction of each satellite image to be used for a given pixel
             final_vza_frac = all_vza / np.nansum(all_vza, axis=2, keepdims=True)
+            
+            #ioc_rgb = np.where(np.isfinite(ioc_rgb), ioc_rgb, 0)
+            #fds_rgb = np.where(np.isfinite(fds_rgb), fds_rgb, 0)
+            #g16_rgb = np.where(np.isfinite(g16_rgb), g16_rgb, 0)
+            #g17_rgb = np.where(np.isfinite(g17_rgb), g17_rgb, 0)
+            #hi8_rgb = np.where(np.isfinite(hi8_rgb), hi8_rgb, 0)
 
             # Compute the final output RGB
             out_rgb_arr = (final_vza_frac[:, :, 0].reshape(ioc_rgb.shape[0], ioc_rgb.shape[1], 1) * ioc_rgb +
@@ -157,37 +176,32 @@ if utils.totfiles(output_dir_rsg) < expected_fnum:
                         final_vza_frac[:, :, 2].reshape(g16_rgb.shape[0], g16_rgb.shape[1], 1) * g16_rgb +
                         final_vza_frac[:, :, 3].reshape(g17_rgb.shape[0], g17_rgb.shape[1], 1) * g17_rgb +
                         final_vza_frac[:, :, 4].reshape(hi8_rgb.shape[0], hi8_rgb.shape[1], 1) * hi8_rgb)
-
-            out_rgb = np.where(out_rgb_arr > max_refl, max_refl, out_rgb_arr)
-            out_rgb = np.where(out_rgb < min_refl, min_refl, out_rgb)
-
-            out_rgb = (255 * out_rgb / max_refl).astype(np.uint8)
-
+            out_rgb_arr[np.where((out_rgb_arr==[0,0,0]).all(axis=2))] = [255,255,255]                      
+            out_rgb = utils.norm_output(out_rgb_arr, max_refl, min_refl)            
             utils.save_img_tiff(out_rgb, outf_name, gt, sr, gdal.GDT_Byte)
-        
             utils.rem_old_files(dirs.idir_tmp, proc_dt)
         except:
             utils.rem_old_files(dirs.idir_tmp, proc_dt)
             quit()
     try:
-        #import gdal2tiles  # noqa: E402
-        #gdal2tiles.generate_tiles(outf_name, output_dir_rsg, zoom=zoomlevs, nb_processes=30, tile_size=tilesize,
-        #                          resume=True, webviewer='none')
-
+        import gdal2tiles  # noqa: E402
+        gdal2tiles.generate_tiles(outf_name, output_dir_rsg, zoom=zoomlevs, nb_processes=30, tile_size=tilesize,
+                                  resume=True, webviewer='none')
+        print('tile generation start') 
         # This method uses the external gdal function
-        gdal_proc = ['/gws/smf/j04/nceo_generic/Software/miniconda3/bin/python',
-                    '-u', '/gws/smf/j04/nceo_generic/Software/miniconda3/bin/gdal2tiles.py', 
-                    '--resampling=bilinear',
-                    '--zoom=0-7',
-                    '--resume',
-                    '--tilesize=256',
-                    '--webviewer=none',
-                    outf_name,
-                    output_dir_rsg,
-                    '--processes=20']
-        subprocess.call(gdal_proc)
-
-        os.remove(outf_name)
+        #gdal_proc = ['/gws/smf/j04/nceo_generic/Software/miniconda3/bin/python',
+        #            '-u', '/gws/smf/j04/nceo_generic/Software/miniconda3/bin/gdal2tiles.py', 
+        #            '--resampling=bilinear',
+        #            '--zoom=0-7',
+        #            '--resume',
+        #            '--tilesize=256',
+        #            '--webviewer=none',
+        #            outf_name,
+        #            output_dir_rsg,
+        #            '--processes=20']
+        #subprocess.call(gdal_proc)
+        print('tile generation end')
+        #os.remove(outf_name)
     except Exception as e:
         print("Error making tiles for", proc_dt)
         print(e)

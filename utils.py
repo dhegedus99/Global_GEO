@@ -10,22 +10,24 @@ import copy
 import s3fs
 import os
 
+
 import warnings
 
 warnings.filterwarnings('ignore')
 
-bands_abi = ['C02', 'C03', 'C05', 'C11', 'C14', 'C15']
-bands_ahi = ['B03', 'B04', 'B05', 'B11', 'B14', 'B15']
-
+#Bands needed for goes
+bands_abi = ['C02', 'C03', 'C05', 'C07', 'C11', 'C14', 'C15']
+#Bands needed for himawari
+bands_ahi = ['B03', 'B04', 'B05', 'B07', 'B11', 'B14', 'B15']
 
 class DirStruct:
     def __init__(self,
-                 idir_top='/work/scratch-nopw2/proud/global_geo/',
-                 tmpdir='/work/scratch-nopw2/proud/tmp/',
+                 idir_top='/work/scratch-nopw2/'+os.environ['USER']+'/global_geo/',
+                 tmpdir='/work/scratch-nopw2/'+os.environ['USER']+'/tmp/',
                  fdsdir=None,
                  iocdir=None,
                  odir=None,
-                 cachedir='/work/scratch-nopw2/proud/tmp/'):
+                 cachedir='/work/scratch-nopw2/'+os.environ['USER']+'/tmp/'):
         """Setup directory structure"""
         self.idir_top = idir_top
         if tmpdir is None:
@@ -263,7 +265,7 @@ def _make_common_ds(scn, composite, vza_thresh=75.):
     return ds
 
 
-def remove_baddata_rgb(indata, minthresh=0, maxthresh=120):
+def remove_baddata_rgb(indata, minthresh=0, maxthresh=255):
     """Remove bad data from an image array.
     Arguments:
         - indata: Numpy array containing the rgb data.
@@ -273,8 +275,13 @@ def remove_baddata_rgb(indata, minthresh=0, maxthresh=120):
         - indata: The modified input data
     """
 
-    indata = np.clip(indata, minthresh, minthresh)
-    indata = np.where(np.isfinite(indata) != True, 0, indata)
+    #indata = np.clip(indata, minthresh, minthresh)
+    indata = np.where(indata > maxthresh, maxthresh, indata)
+    indata = np.where(indata < minthresh, minthresh, indata)
+    indata[np.where((indata==[0,0,0]).all(axis=2))] = [255,255,255]
+    indata = np.where(np.isfinite(indata), indata, 0)
+    #indata = np.where(np.isfinite(indata) != True, 0, indata)
+    
 
     return indata
 
@@ -317,6 +324,7 @@ def load_seviri(indir, dater, thequeue, composite, vza_thresh, mission, opts):
         raise ValueError("Not enough SEVIRI data for processing.")
 
     scn = Scene(curfiles, reader='seviri_l1b_hrit')
+    print('seviri', scn.available_composite_ids())
     scn.load([composite], upper_right_corner='NE')
     
     cur_ds = _make_common_ds(scn, composite, vza_thresh)
@@ -344,20 +352,17 @@ def load_goes(indir, dater, thequeue, composite, vza_thresh, resampler, sat, opt
     """
 
     curfiles = dl_goes(indir, dater, sat)
-
     if len(curfiles) < 4:
         raise ValueError("Not enough GOES ABI data for processing.")
 
     scn = Scene(curfiles, reader='abi_l1b')
+    print('goes', scn.available_composite_ids())
     scn.load([composite], generate=False)
     scn = scn.resample(scn.coarsest_area(), resampler=resampler)
-    
     cur_ds = _make_common_ds(scn, composite, vza_thresh)
-    
     rgb, vza, gt, sr = resample_img(cur_ds, opts)
    
     thequeue[sat] = (rgb, vza, gt, sr)
-
     return
 
 
@@ -384,12 +389,13 @@ def load_himawari(indir,
     """
 
     curfiles = dl_himawari(indir, dater)
-
+    
     if len(curfiles) < 4:
         print(curfiles)
         raise ValueError("Not enough Himawari HSD data for processing.")
-
+        
     scn = Scene(curfiles, reader='ahi_hsd')
+    print('himawari',scn.available_composite_ids())
     scn.load([composite, ref_band], generate=False)
     scn = scn.resample(scn.coarsest_area(), resampler=resampler)
     scn[composite].attrs['orbital_parameters'] = scn[ref_band].attrs['orbital_parameters']
@@ -399,6 +405,7 @@ def load_himawari(indir,
     rgb, vza, gt, sr = resample_img(cur_ds, opts)
 
     thequeue['hi8'] = (rgb, vza, gt, sr)
+    
     return
 
 

@@ -33,22 +33,8 @@ Note:
 To run the global_geo processing, run: 
 ```./run_geo```
 
-
-To run, simply execute:
- python Global_GEO.py
-
-And the script will process the most recent suitable timeslot
+By default, the script will process the most recent suitable timeslot
 (hourly, due to SEVIRI license restrictions imposed on the RSG
-group). To process older data, instead run the script with a
-command line argument specifying the desired timeslot:
- python Global_GEO.py 202210051200
-Where the timeslot is in YYYYmmddHHMM format.
-
-This script requires numerous libraries, most notably:
- - satpy and dependencies
- - s3fs
- - gdal
-
-Also note that for performance reasons, an internal satpy function
-( _get_sensor_angles) is used. This is not a supported function so
-the utility may break at any point in the future.
+group). To process older data, instead specify the desired timeslot by 
+editing the ```dtstr``` variable in run_geo, where the timeslot is in 
+YYYYmmddHHMM format.

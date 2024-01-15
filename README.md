@@ -1,4 +1,4 @@
-#### GLOBAL GEO COMPOSITE CREATOR ####
+# GLOBAL GEO COMPOSITE CREATOR ####
 
 These scripts produce global geostationary composite imagery from
 Himawari-8, GOES-16, GOES-18, Meteosat-9 and Meteosat-10.

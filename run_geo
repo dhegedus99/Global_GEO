@@ -1,17 +1,23 @@
 #!/bin/bash
-
+whoami
 #SBATCH --cpus-per-task=10
 #SBATCH --time=00:25:00
 #SBATCH --mem=30000M
 #SBATCH --job-name=glob_geo
 #SBATCH --account=rsgnrt
 #SBATCH --partition=rsgnrt
-#SBATCH --output=/gws/smf/j04/nceo_generic/Software/globgeo/globgeo.log
-#SBATCH --error=/gws/smf/j04/nceo_generic/Software/globgeo/globgeo.err
+#SBATCH --output=/gws/smf/j04/nceo_generic/Software/globgeo_dora/globgeo.log
+#SBATCH --error=/gws/smf/j04/nceo_generic/Software/globgeo_dora/globgeo.err
 
-export LD_LIBRARY_PATH=""
-. /gws/smf/j04/nceo_generic/Software/miniconda3/etc/profile.d/conda.sh
-conda activate base 
-export PATH=/gws/smf/j04/nceo_generic/Software/miniconda3/bin/:$PATH
+export XRIT_DECOMPRESS_PATH=/home/users/$USER/bin/xRITDecompress
 
-/gws/smf/j04/nceo_generic/Software/miniconda3/bin/python -u /gws/smf/j04/nceo_generic/Software/globgeo/Global_GEO.py
+module load jaspy
+source /home/users/$USER/glob_geo_env/bin/activate
+
+
+outdir_top=/gws/pw/j07/rsg_share/public/nrt/nrt_imagery_geo_global/quick_look_cesium/
+cachedir=/work/scratch-nopw2/$USER/tmp/
+tmpdir=/work/scratch-nopw2/$USER/tmp/
+idir_top=/work/scratch-nopw2/$USER/global_geo/
+
+python Global_GEO.py --outdir_top=$outdir_top --idir_top=$idir_top --tmpdir=$tmpdir --cachedir=$cachedir

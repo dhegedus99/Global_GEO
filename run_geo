@@ -8,7 +8,10 @@ outdir_top=${2}
 idir_top=${3}
 tmpdir=${4}
 cachedir=${5}
+logdir=${6}
+pydir=${7}
+XRIT_Decompress_path=${8}
 
-python Global_GEO.py --outdir_top=$outdir_top --idir_top=$idir_top --tmpdir=$tmpdir --cachedir=$cachedir $dtstr
+python Global_GEO.py --outdir_top=$outdir_top --idir_top=$idir_top --tmpdir=$tmpdir --cachedir=$cachedir --logdir=$logdir --pydir=$pydir --XRIT_Decompress_path=$XRIT_Decompress_path $dtstr
 
             

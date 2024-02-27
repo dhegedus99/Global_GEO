@@ -1,6 +1,9 @@
 from satpy.modifiers.angles import _get_sensor_angles
 from pyresample import create_area_def
 from osgeo import gdal
+import subprocess
+import pickle
+import re
 from satpy import Scene
 from glob import glob
 import numpy as np
@@ -27,6 +30,8 @@ class DirStruct:
                  fdsdir=None,
                  iocdir=None,
                  odir=None,
+                 pydir='/home/users/dhegedus/Global_GEO/',
+                 logdir=None,
                  cachedir='/work/scratch-nopw2/'+os.environ['USER']+'/tmp/'):
         """Setup directory structure"""
         self.idir_top = idir_top
@@ -49,6 +54,8 @@ class DirStruct:
             self.odir = f'{idir_top}/out/'
         else:
             self.odir = odir
+        self.pydir = pydir
+        self.logdir=logdir
 
         if cachedir is None:
             self.cache_dir = f'{idir_top}/cache/'
@@ -167,14 +174,10 @@ def norm_output(in_rgb, max_refl, min_refl):
     return (255 * out_rgb / max_refl).astype(np.uint8)
 
 
-def create_vza_frac(ioc, fds, g16, g17, hi8, vza_thresh_max):
+def create_vza_frac(tup, vza_thresh_max):
     """
     Arguments:
-        ioc: Numpy array, Indian Ocean SEV view zenith angle.
-        fds: Numpy array, Prime SEV view zenith angle.
-        g16: Numpy array, GOES-E ABI view zenith angle.
-        g17: Numpy array, GOES-W ABI view zenith angle.
-        hi8: Numpy array, Himawari-8 AHI view zenith angle.
+        tup: tuple of numpy arrays of ioc, fds, g16,g18, hi8 view zenith angles
         vza_thresh_max: Float, the maximum acceptable VZA in degrees.
     Returns:
         -   vza_frac: Numpy array giving the fraction of each satellite scene to use in output image.
@@ -182,7 +185,7 @@ def create_vza_frac(ioc, fds, g16, g17, hi8, vza_thresh_max):
 
     # Compute which satellite is best to use at a given location
     # First, create a stacked array with all the VZAs
-    all_vza = np.dstack((ioc, fds, g16, g17, hi8))
+    all_vza = np.dstack(tup)
     # Remove bad (fill value or very high) VZA values
     all_vza = np.where(all_vza >= vza_thresh_max, vza_thresh_max, all_vza)
     all_vza = np.where(all_vza < 0.0001, vza_thresh_max, all_vza)
@@ -265,7 +268,7 @@ def _make_common_ds(scn, composite, vza_thresh=75.):
     return ds
 
 
-def remove_baddata_rgb(indata, minthresh=0, maxthresh=255):
+def remove_baddata_rgb(indata, minthresh=0, maxthresh=1):
     """Remove bad data from an image array.
     Arguments:
         - indata: Numpy array containing the rgb data.
@@ -321,17 +324,22 @@ def load_seviri(indir, dater, thequeue, composite, vza_thresh, mission, opts):
     dirstr = dater.strftime("%Y/%m/%d/")
     curfiles = glob(f'{indir}/{dirstr}/*{dater.strftime("%Y%m%d%H%M")}*')
     if len(curfiles) < 50:
-        raise ValueError("Not enough SEVIRI data for processing.")
+        try:
+            raise ValueError("Not enough SEVIRI data for processing.")
+        except ValueError as err:
+            print(err)
+            #raise ValueError("Not enough SEVIRI data for processing.")
+    else:
 
-    scn = Scene(curfiles, reader='seviri_l1b_hrit')
-    print('seviri', scn.available_composite_ids())
-    scn.load([composite], upper_right_corner='NE')
-    
-    cur_ds = _make_common_ds(scn, composite, vza_thresh)
-    
-    rgb, vza, gt, sr = resample_img(cur_ds, opts)
-   
-    thequeue[mission] = (rgb, vza, gt, sr)
+        scn = Scene(curfiles, reader='seviri_l1b_hrit')
+        print('seviri', scn.available_composite_ids())
+        scn.load([composite], upper_right_corner='NE')
+        
+        cur_ds = _make_common_ds(scn, composite, vza_thresh)
+        
+        rgb, vza, gt, sr = resample_img(cur_ds, opts)
+        rgb = remove_baddata_rgb(rgb)
+        thequeue[mission] = (rgb, vza, gt, sr)
 
     return 
 
@@ -353,16 +361,20 @@ def load_goes(indir, dater, thequeue, composite, vza_thresh, resampler, sat, opt
 
     curfiles = dl_goes(indir, dater, sat)
     if len(curfiles) < 4:
-        raise ValueError("Not enough GOES ABI data for processing.")
-
-    scn = Scene(curfiles, reader='abi_l1b')
-    print('goes', scn.available_composite_ids())
-    scn.load([composite], generate=False)
-    scn = scn.resample(scn.coarsest_area(), resampler=resampler)
-    cur_ds = _make_common_ds(scn, composite, vza_thresh)
-    rgb, vza, gt, sr = resample_img(cur_ds, opts)
-   
-    thequeue[sat] = (rgb, vza, gt, sr)
+        try:
+            raise ValueError("Not enough GOES ABI data for processing.")
+        except ValueError as err:
+            print(err)
+            #raise ValueError("Not enough GOES ABI data for processing.")
+    else:
+        scn = Scene(curfiles, reader='abi_l1b')
+        print('goes', scn.available_composite_ids())
+        scn.load([composite], generate=False)
+        scn = scn.resample(scn.coarsest_area(), resampler=resampler)
+        cur_ds = _make_common_ds(scn, composite, vza_thresh)
+        rgb, vza, gt, sr = resample_img(cur_ds, opts)
+        rgb = remove_baddata_rgb(rgb)
+        thequeue[sat] = (rgb, vza, gt, sr)
     return
 
 
@@ -392,22 +404,195 @@ def load_himawari(indir,
     
     if len(curfiles) < 4:
         print(curfiles)
-        raise ValueError("Not enough Himawari HSD data for processing.")
-        
-    scn = Scene(curfiles, reader='ahi_hsd')
-    print('himawari',scn.available_composite_ids())
-    scn.load([composite, ref_band], generate=False)
-    scn = scn.resample(scn.coarsest_area(), resampler=resampler)
-    scn[composite].attrs['orbital_parameters'] = scn[ref_band].attrs['orbital_parameters']
-
-    cur_ds = _make_common_ds(scn, composite, vza_thresh)
-
-    rgb, vza, gt, sr = resample_img(cur_ds, opts)
-
-    thequeue['hi8'] = (rgb, vza, gt, sr)
+        try:
+            raise ValueError("Not enough Himawari HSD data for processing.")
+        except ValueError as err:
+            print(err)
+            #raise ValueError("Not enough Himawari HSD data for processing.")
+    else:    
+        scn = Scene(curfiles, reader='ahi_hsd')
+        print('himawari',scn.available_composite_ids())
+        scn.load([composite, ref_band], generate=False)
+        scn = scn.resample(scn.coarsest_area(), resampler=resampler)
+        scn[composite].attrs['orbital_parameters'] = scn[ref_band].attrs['orbital_parameters']
+    
+        cur_ds = _make_common_ds(scn, composite, vza_thresh)
+    
+        rgb, vza, gt, sr = resample_img(cur_ds, opts)
+        rgb = remove_baddata_rgb(rgb)
+        thequeue['hi8'] = (rgb, vza, gt, sr)
     
     return
 
+def submit_fds(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max):
+    if batch:
+        # Load data
+        job_name='gg_sev_fds'
+        cmdbatch = 'sbatch --job-name='+job_name \
+                    +' -o '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.log' \
+                    +' -e '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.err' \
+                    +' --mem=10G'+' -p '+queue \
+                    +' --time=00:10:00'
+        cmd = cmdbatch+' '+dirs.pydir+'load_seviri_fds.py' \
+                      + ' ' + '--idir_fds=' + dirs.idir_fds +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                      +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                      + '--scratch_dir=' + dirs.idir_tmp +' '+ '--cache_dir=' + dirs.cache_dir
+        out = subprocess.check_output(cmd.split(' '), universal_newlines=True)
+        m = re.search('Submitted batch job (?P<ID>\d+)',out)
+        fds_id = m.group('ID')
+        print('Seviri FDS processing job submitted with ID: ',fds_id)
+    else:
+        cmd = 'python'
+        cmd =cmd+' '+dirs.pydir+'load_seviri_fds.py' \
+                + ' ' + '--idir_fds=' + dirs.idir_fds +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                + '--scratch_dir=' + dirs.idir_tmp +' '+ '--cache_dir=' + dirs.cache_dir
+        os.system(cmd)
+        fds_id = ''
+    return fds_id
+        
+def submit_ioc(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max):
+    if batch:
+        # Load data
+        job_name='gg_sev_ioc'
+        cmdbatch = 'sbatch --job-name='+job_name \
+                    +' -o '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.log' \
+                    +' -e '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.err' \
+                    +' --mem=10G'+' -p '+queue \
+                    +' --time=00:10:00'
+        cmd = cmdbatch+' '+dirs.pydir+'load_seviri_ioc.py' \
+                      + ' ' + '--idir_ioc=' + dirs.idir_ioc +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                      +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                      + '--scratch_dir=' + dirs.idir_tmp +' '+ '--cache_dir=' + dirs.cache_dir
+        out = subprocess.check_output(cmd.split(' '), universal_newlines=True)
+        m = re.search('Submitted batch job (?P<ID>\d+)',out)
+        ioc_id = m.group('ID')
+        print('Seviri IOC processing job submitted with ID: ',ioc_id)
+    else:
+        cmd = 'python'
+        cmd =cmd+' '+dirs.pydir+'load_seviri_ioc.py' \
+                + ' ' + '--idir_ioc=' + dirs.idir_ioc +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                + '--scratch_dir=' + dirs.idir_tmp +' '+ '--cache_dir=' + dirs.cache_dir
+        os.system(cmd)
+        ioc_id = ''
+    return ioc_id
+        
+def submit_hi8(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max):
+    resampler='native'
+    ref_band='B04'
+    if batch:
+        job_name='gg_hi8'
+        cmdbatch = 'sbatch --job-name='+job_name \
+                +' -o '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.log' \
+                +' -e '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.err' \
+                +' --mem=10G'+' -p '+queue \
+                +' --time=00:10:00'
+        cmd = cmdbatch+' '+dirs.pydir+'load_himawari.py' \
+                   + ' ' + '--idir_tmp=' + dirs.idir_tmp +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                   +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                   + '--resampler='+ resampler + ' ' + '--ref_band=' + ref_band +' '+ '--cache_dir=' + dirs.cache_dir
+        out = subprocess.check_output(cmd.split(' '), universal_newlines=True)
+        m = re.search('Submitted batch job (?P<ID>\d+)',out)
+        hi8_id = m.group('ID')
+        print('Himawari-8 processing job submitted with ID: ',hi8_id)
+    else:
+        cmd = 'python'
+        cmd =cmd+' '+dirs.pydir+'load_himawari.py' \
+                + ' ' + '--idir_tmp=' + dirs.idir_tmp +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                + '--resampler='+ resampler + ' ' + '--ref_band=' + ref_band +' '+ '--cache_dir=' + dirs.cache_dir
+        os.system(cmd)
+        hi8_id = ''
+    return hi8_id
+
+def submit_g18(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max):
+    resampler='native'
+    if batch:
+        job_name='gg_goes18'
+        cmdbatch = 'sbatch --job-name='+job_name \
+                +' -o '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.log' \
+                +' -e '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.err' \
+                +' --mem=10G'+' -p '+queue \
+                +' --time=00:10:00'
+        cmd = cmdbatch+' '+dirs.pydir+'load_goes18.py' \
+                   + ' ' + '--idir_tmp=' + dirs.idir_tmp +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                   +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                   + '--resampler='+ resampler +' '+ '--cache_dir=' + dirs.cache_dir
+        out = subprocess.check_output(cmd.split(' '), universal_newlines=True)
+        m = re.search('Submitted batch job (?P<ID>\d+)',out)
+        g18_id = m.group('ID')
+        print('Goes 18 processing job submitted with ID: ',g18_id)
+    else:
+        cmd = 'python'
+        cmd =cmd+' '+dirs.pydir+'load_goes18.py' \
+                + ' ' + '--idir_tmp=' + dirs.idir_tmp +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                + '--resampler='+ resampler +' '+ '--cache_dir=' + dirs.cache_dir
+        os.system(cmd)
+        g18_id = ''
+    return g18_id
+
+def submit_g16(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max):
+    resampler='native'
+    if batch:
+        job_name='gg_goes16'
+        cmdbatch = 'sbatch --job-name='+job_name \
+                +' -o '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.log' \
+                +' -e '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.err' \
+                +' --mem=10G'+' -p '+queue \
+                +' --time=00:10:00'
+        cmd = cmdbatch+' '+dirs.pydir+'load_goes16.py' \
+                   + ' ' + '--idir_tmp=' + dirs.idir_tmp +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                   +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                   + '--resampler='+ resampler  +' '+ '--cache_dir=' + dirs.cache_dir
+        out = subprocess.check_output(cmd.split(' '), universal_newlines=True)
+        m = re.search('Submitted batch job (?P<ID>\d+)',out)
+        g16_id = m.group('ID')
+        print('Goes 16 processing job submitted with ID: ',g16_id)
+    else:
+        cmd = 'python'
+        cmd =cmd+' '+dirs.pydir+'load_goes16.py' \
+                + ' ' + '--idir_tmp=' + dirs.idir_tmp +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M")+' ' \
+                +'--comp='+comp+' ' + '--vza_thresh_max=' + str(vza_thresh_max) +' ' \
+                + '--resampler='+ resampler  +' '+ '--cache_dir=' + dirs.cache_dir
+        os.system(cmd)
+        g16_id = ''
+    return g16_id
+    
+def submit_tif(batch, job_name, outf_name, proc_dt, queue, dirs, vza_thresh_max, min_refl, max_refl, ids):
+    if batch:
+        cmdbatch = 'sbatch --job-name='+job_name \
+                +' -o '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.log' \
+                +' -e '+dirs.logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.err' \
+                +' --mem=10G'+' -p '+queue \
+                +' --time=00:30:00'
+        print(ids)
+        ids = [x for x in ids if x]
+        print(ids)
+        cmd = cmdbatch+ ' ' +'--dependency=afterany'
+        for j in ids:
+            cmd = cmd+':'+j
+        cmd =cmd+' '+dirs.pydir+'make_tif.py' \
+                       + ' ' + '--outf_name='+ outf_name + ' ' + '--tmpdir=' + dirs.idir_tmp +' ' \
+                       +'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M") \
+                       + ' '+ '--vza_thresh_max=' + str(vza_thresh_max) \
+                       +' ' + '--min_refl='+ str(min_refl) + ' ' + '--max_refl=' + str(max_refl)
+        out = subprocess.check_output(cmd.split(' '), universal_newlines=True)
+        m = re.search('Submitted batch job (?P<ID>\d+)',out)
+        tif_id = m.group('ID')
+        print('TIF file generation submitted with ID: ',tif_id)
+    else:
+        cmd = 'python'
+        cmd =cmd+' '+dirs.pydir+'make_tif.py' \
+                       + ' ' + '--outf_name='+ outf_name + ' ' + '--tmpdir=' + dirs.idir_tmp +' ' \
+                       +' '+'--proc_dt='+proc_dt.strftime("%Y%m%d%H%M") + ' '\
+                       + '--vza_thresh_max=' + str(vza_thresh_max) +' ' + \
+                       '--min_refl='+ str(min_refl) + ' ' + '--max_refl=' + str(max_refl)
+                        
+        os.system(cmd)
+        tif_id = ''
+    return tif_id
 
 def resample_img(in_ds, opts, fname=''):
     """Use GDAL to resample input data onto another grid.

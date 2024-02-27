@@ -1,15 +1,46 @@
-from datetime import datetime, timedelta  # noqa: E402
+"""DESCRIPTION ####
+
+This is the main script for producing Global Geo-composites from 5 geostationary 
+satellites: Goes East, Goes West, Himawari, MSG IODC (Indian Ocean Data Coverage)
+and MSG FDS (Full Disk Service).
+
+The script creates some temporary files:
+- tif file of the processed data: once tiling is complete this is deleted
+- return_dict_YYYYMMDDHH00.pkl file: dictionary containing all the processed data, 
+so we can make sure we have processed all 5 datasets
+WARNING: once processing is complete, the data from return_dict_YYYYMMDDHH00.pkl is
+deleted and it will only contain a list of all datasets used. This would throw 
+an error when trying to read in the pickle file as the script assumes a dictionary 
+format. This error means no more processing is needed 
+
+"""
+
+from datetime import datetime # noqa: E402
 import os, stat  # noqa: E402
 import utils  # noqa: E402
 import sys  # noqa: E402
 from getopt import getopt
 import matplotlib.pyplot as plt
 import numpy as np
+import subprocess
+from osgeo import gdal, gdalconst
+from glob import glob
+import pickle
+import re
+import satpy
+import shutil  # noqa: E402
 import warnings  # noqa: E402
 warnings.filterwarnings('ignore')
+#os.environ["XRIT_DECOMPRESS_PATH"]='/home/users/'+os.environ['USER']+'/bin/xRITDecompress'
 
 
-options, operands = getopt(sys.argv[1:], "", ["outdir_top=", "idir_top=", "tmpdir=", "cachedir="])
+### Batch Specifications ###
+batch=True
+queue='short-serial'
+
+
+### Path Specifications ###
+options, operands = getopt(sys.argv[1:], "", ["outdir_top=", "idir_top=", "tmpdir=", "cachedir=", "pydir=", "logdir=", "XRIT_Decompress_path="])
 for o,v in options:
     if o == "--outdir_top":
         topdir_remote = v
@@ -19,9 +50,16 @@ for o,v in options:
         tmpdir = v
     if o == "--cachedir":
         cachedir = v
-        
+    if o == "--pydir":
+        pydir = v
+    if o == "--logdir":
+        logdir = v
+    if o == "--XRIT_Decompress_path":
+        os.environ["XRIT_DECOMPRESS_PATH"] = v
 
-if len(sys.argv) < 6:
+        
+### Datetime to be processed ###
+if len(sys.argv) < 9:
     proc_dt = datetime.utcnow().replace(microsecond=0, second=0, minute=0)
 else:
     dtstr = sys.argv[-1]
@@ -30,190 +68,183 @@ else:
     except ValueError:
         raise ValueError("You must enter a processing date/time in format YYYYMMDDHHMM.")
 
-timedelt = timedelta(hours=1)
-
-# Remote directory into which output data will be saved.
-#topdir_remote = '/gws/pw/j07/rsg_share/public/nrt/nrt_imagery_geo_global/quick_look_cesium/'
 print("Processing:", proc_dt)
 
-# view zenith angle limits. Data not produced above these
+
+### False Colour Composite specifications ###
+# view zenith angle limits
 vza_thresh_max = 80.
-
-# The composite to produce.
+# name of composite in satpy
 comp = 'natural_color_raw_with_night_ir'
-
 # Limits on reflectance, sometimes these are exceeded due to calibration
 # or high solar angle issues. Setting these prevents edge cases from 
 # producing odd-looking output.
 min_refl = 0
 max_refl = 1
 
+
+### Tiling Specifications ###
 # Expected number of files in tile directory
 expected_fnum = 2734
-
-# These are for the tiled output used in the VIS tool
 zoomlevs = '0-6'
 tilesize = 512
-processes = 7
 
-# This is the output file on the public folder for use by the VIS tool
+
+### Directory structure ###
+dirs = utils.DirStruct(tmpdir=tmpdir, cachedir=cachedir, idir_top=idir_top, logdir=logdir, pydir=pydir)
+
+
+### Output file ###
 output_dir_rsg = f'{topdir_remote}/{proc_dt.strftime("%Y/%m/%d")}/GLOBAL_GEO_{proc_dt.strftime("%Y%m%d%H%M")}_V1_00_FC/'
-os.makedirs(output_dir_rsg, exist_ok=True)
-
-# Check that the files don't already exist, to save unnecessary reprocessing.
-if os.path.exists(output_dir_rsg):
-    if utils.totfiles(output_dir_rsg) >= expected_fnum:
-        print("Output files already exist on RSGNCEO. Not processing.")
-        quit()
-
-# Otherwise, continue
-if utils.totfiles(output_dir_rsg) < expected_fnum:
-    from multiprocessing import Process, Queue  # noqa: E402
-    from osgeo import gdal, gdalconst  # noqa: E402
-    import multiprocessing as mp  # noqa: E402
-    import numpy as np  # noqa: E402
-    import subprocess  # noqa: E402
-    import shutil  # noqa: E402
-
-    dirs = utils.DirStruct(tmpdir=tmpdir, cachedir=cachedir, idir_top=idir_top)
-    
-    import satpy
-    # Set some satpy options to defaults.
-    satpy.config.set(cache_dir=dirs.cache_dir)
-    satpy.config.set(tmp_dir=dirs.idir_tmp)
-    satpy.config.set(cache_lonlats=True)
-    satpy.config.set(cache_sensor_angles=True)
-    #satpy.config.set(tmp_dir=dirs.tmpdir)
+outf_name = f'{dirs.odir}/GLOBAL_GEO_{proc_dt.strftime("%Y%m%d%H%M")}_V1_00_FC.tif'
 
 
-    proj_str, extent, targ_srs = utils.setup_global_area(res=0.03)
+### Configure Satpy ###
+satpy.config.set(cache_dir=dirs.cache_dir)
+satpy.config.set(tmp_dir=dirs.idir_tmp)
+satpy.config.set(cache_lonlats=True)
+satpy.config.set(cache_sensor_angles=True)
 
-    worp_opts = gdal.WarpOptions(width=targ_srs.width,
-                                height=targ_srs.height,
-                                outputType=gdal.GDT_Float32,
-                                dstSRS=proj_str,
-                                dstNodata=-999.,
-                                outputBounds=extent,
-                                format="vrt",
-                                resampleAlg=gdalconst.GRA_Bilinear,
-                                multithread=True)
 
-    outf_name = f'{dirs.odir}/GLOBAL_GEO_{proc_dt.strftime("%Y%m%d%H%M")}_V1_00_FC.tif'
-    print(outf_name)
-    if os.path.exists(outf_name):
-        print("Output file exists, skipping image generation for", proc_dt)
-    else:
-        # Load data
-        try:
-            return_dict= {}
-            manager = mp.Manager()
-            return_dict = manager.dict()
-            jobs = []
+### START OF PROCESSING ###
 
-            # Process SEVIRI PRIME
-            p = Process(target=utils.load_seviri, args=(dirs.idir_fds, proc_dt, return_dict, comp, vza_thresh_max, 'fds', worp_opts,))
-            p.start()
-            jobs.append(p)
-            # Process SEVIRI IODC
-            p = Process(target=utils.load_seviri, args=(dirs.idir_ioc, proc_dt, return_dict, comp, vza_thresh_max, 'ioc', worp_opts,))
-            p.start()
-            jobs.append(p)
-            # Process ABI GOES-E
-            p = Process(target=utils.load_goes, args=(dirs.idir_tmp, proc_dt, return_dict, comp, vza_thresh_max, 'native', 'goes16', worp_opts,))
-            p.start()
-            jobs.append(p)
-            # Process ABI GOES-W
-            p = Process(target=utils.load_goes, args=(dirs.idir_tmp, proc_dt, return_dict, comp, vza_thresh_max, 'native', 'goes18', worp_opts,))
-            p.start()
-            jobs.append(p)
-            # Process AHI Himawari-9
-            p = Process(target=utils.load_himawari, args=(dirs.idir_tmp, proc_dt, return_dict, comp, vza_thresh_max, 'native', 'B04', worp_opts,))
-            p.start()
-            jobs.append(p)
 
-            for proc in jobs:
-                proc.join()
-
-            # Get the individual datasets
-            fds_rgb, fds_vza, gt, sr = return_dict['fds']
-            ioc_rgb, ioc_vza, gt, sr = return_dict['ioc']
-            g16_rgb, g16_vza, gt, sr = return_dict['goes16']
-            g17_rgb, g17_vza, gt, sr = return_dict['goes18']
-            hi8_rgb, hi8_vza, gt, sr = return_dict['hi8']
-            print('data read in')
-            # Remove NaNs from datasets
-            ioc_rgb = utils.remove_baddata_rgb(ioc_rgb, minthresh=min_refl, maxthresh=max_refl)
-            fds_rgb = utils.remove_baddata_rgb(fds_rgb, minthresh=min_refl, maxthresh=max_refl)
-            g16_rgb = utils.remove_baddata_rgb(g16_rgb, minthresh=min_refl, maxthresh=max_refl)
-            g17_rgb = utils.remove_baddata_rgb(g17_rgb, minthresh=min_refl, maxthresh=max_refl)
-            hi8_rgb = utils.remove_baddata_rgb(hi8_rgb, minthresh=min_refl, maxthresh=max_refl)
-            
-            # Compute which satellite is best to use at a given location
-            # First, create a stacked array with all the VZAs
-            all_vza = np.dstack((ioc_vza, fds_vza, g16_vza, g17_vza, hi8_vza))
-            # Remove bad (fill value or very high) VZA values
-            all_vza = np.where(all_vza >= vza_thresh_max, vza_thresh_max, all_vza)
-            all_vza = np.where(all_vza < 0.0001, vza_thresh_max, all_vza)
-            all_vza = np.where(np.isfinite(all_vza), all_vza, 0)
-            all_vza = np.where(np.isnan(all_vza), 0, all_vza)
-
-            # Compute inverse VZA compared to maximum acceptable
-            all_vza = vza_thresh_max - all_vza
-            all_vza = np.where(all_vza >= vza_thresh_max, 0, all_vza)
-
-            # Compute fraction of each satellite image to be used for a given pixel
-            final_vza_frac = all_vza / np.nansum(all_vza, axis=2, keepdims=True)
-            
-            #ioc_rgb = np.where(np.isfinite(ioc_rgb), ioc_rgb, 0)
-            #fds_rgb = np.where(np.isfinite(fds_rgb), fds_rgb, 0)
-            #g16_rgb = np.where(np.isfinite(g16_rgb), g16_rgb, 0)
-            #g17_rgb = np.where(np.isfinite(g17_rgb), g17_rgb, 0)
-            #hi8_rgb = np.where(np.isfinite(hi8_rgb), hi8_rgb, 0)
-
-            # Compute the final output RGB
-            out_rgb_arr = (final_vza_frac[:, :, 0].reshape(ioc_rgb.shape[0], ioc_rgb.shape[1], 1) * ioc_rgb +
-                        final_vza_frac[:, :, 1].reshape(fds_rgb.shape[0], fds_rgb.shape[1], 1) * fds_rgb +
-                        final_vza_frac[:, :, 2].reshape(g16_rgb.shape[0], g16_rgb.shape[1], 1) * g16_rgb +
-                        final_vza_frac[:, :, 3].reshape(g17_rgb.shape[0], g17_rgb.shape[1], 1) * g17_rgb +
-                        final_vza_frac[:, :, 4].reshape(hi8_rgb.shape[0], hi8_rgb.shape[1], 1) * hi8_rgb)
-            out_rgb_arr[np.where((out_rgb_arr==[0,0,0]).all(axis=2))] = [255,255,255]                      
-            out_rgb = utils.norm_output(out_rgb_arr, max_refl, min_refl)            
-            utils.save_img_tiff(out_rgb, outf_name, gt, sr, gdal.GDT_Byte)
-            utils.rem_old_files(dirs.idir_tmp, proc_dt)
-        except:
-            utils.rem_old_files(dirs.idir_tmp, proc_dt)
-            quit()
+# Check if any data has been processed already
+if os.path.exists(tmpdir+"return_dict"+proc_dt.strftime("%Y%m%d%H%M")+".pkl"):
+    # If pickle file exists, some processing has been done already
+    # Read in pickle file to check which data is already processed
+    my_objects = [] 
     try:
-        import gdal2tiles  # noqa: E402
-        gdal2tiles.generate_tiles(outf_name, output_dir_rsg, zoom=zoomlevs, nb_processes=30, tile_size=tilesize,
-                                  resume=True, webviewer='none')
-        print('tile generation start') 
-        # This method uses the external gdal function
-        #gdal_proc = ['/gws/smf/j04/nceo_generic/Software/miniconda3/bin/python',
-        #            '-u', '/gws/smf/j04/nceo_generic/Software/miniconda3/bin/gdal2tiles.py', 
-        #            '--resampling=bilinear',
-        #            '--zoom=0-7',
-        #            '--resume',
-        #            '--tilesize=256',
-        #            '--webviewer=none',
-        #            outf_name,
-        #            output_dir_rsg,
-        #            '--processes=20']
-        #subprocess.call(gdal_proc)
-        print('tile generation end')
-        #os.remove(outf_name)
-    except Exception as e:
-        print("Error making tiles for", proc_dt)
+        with open(tmpdir+'return_dict'+proc_dt.strftime("%Y%m%d%H%M")+'.pkl', 'rb') as f:
+            while True:
+                my_objects.append(pickle.load(f))
+    except EOFError:
+        pass
+    except Exception as e: 
         print(e)
-
+        print('File is corrupted/cannot be opened/pickling is throwing an error, restarting processing')
+        os.remove(tmpdir+"return_dict"+proc_dt.strftime("%Y%m%d%H%M")+".pkl")
+            
+        with open(tmpdir+'return_dict'+proc_dt.strftime("%Y%m%d%H%M")+'.pkl','wb+') as f:
+            pass
+        return_dict={}
+    try:
+        return_dict = dict((key,d[key]) for d in my_objects for key in d)
+    except TypeError:
+        print('Processing is already done, temporary files already deleted.')
+        print('Nothing to do, exiting script.')
+        quit()
+    print(return_dict.keys())
+    if len(return_dict) <5:
+        # Fill in gaps in processing for any missing data
+        print("Not all data was used, restarting image generation.")
+        ids=[]
+        if not "fds" in return_dict.keys():
+            job_name='gg_sev_fds'
+            fds_id = utils.submit_fds(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+            ids.append(fds_id)
+        if not "ioc" in return_dict.keys():
+            job_name='gg_sev_ioc'
+            ioc_id = utils.submit_ioc(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+            ids.append(ioc_id)
+        if not "hi8" in return_dict.keys():
+            job_name='gg_hi8'
+            hi8_id = utils.submit_hi8(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+            ids.append(hi8_id)
+        if not "goes16" in return_dict.keys():
+            job_name='gg_goes16'
+            g16_id = utils.submit_g16(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+            ids.append(g16_id)
+        if not "goes18" in return_dict.keys():
+            job_name='gg_goes18'
+            g18_id = utils.submit_g18(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+            ids.append(g18_id)
+        job_name='gg_tif'
+        tif_id = utils.submit_tif(batch, job_name, outf_name, proc_dt, queue, dirs, vza_thresh_max, min_refl, max_refl, ids)     
+    else:
+        # All the data has been processed and is in the pickle file
+        if os.path.exists(output_dir_rsg):
+            # If final output tiles all exist, no need to do any reprocessing
+            print("Output files already exist on RSGNCEO. Not processing.")
+            my_objects = [] 
+            try:
+                with open(tmpdir+'return_dict'+proc_dt.strftime("%Y%m%d%H%M")+'.pkl', 'rb') as f:
+                        while True:
+                            my_objects.append(pickle.load(f))
+            except EOFError:
+                pass
+            except Exception as e: 
+                print(e)
+                os.remove(tmpdir+"return_dict"+proc_dt.strftime("%Y%m%d%H%M")+".pkl")
+            return_dict = dict((key,d[key]) for d in my_objects for key in d)
+            # Delete temporary/cached files and only keep the list of processed data in the 
+            # pickle file (to save storage space, but know not to reprocess)
+            if (utils.totfiles(output_dir_rsg) >= expected_fnum) & (len(return_dict) ==5):
+                with open(tmpdir+'return_dict'+proc_dt.strftime("%Y%m%d%H%M")+'.pkl', 'wb+') as f:
+                    fcntl.lockf(f, fcntl.LOCK_EX)
+                    pickle.dump(list(return_dict.keys()), f)
+                    fcntl.lockf(f, fcntl.F_UNLCK)
+                os.remove(glob(tmpdir,"*.nc"))
+                os.remove(glob(tmpdir,proc_dt.strftime("%Y%m%d_%H%M")+"*.bz2"))
+                os.remove(glob(outf_name))
+                print('Deleting all temporary files, have everything we need')
+                quit()
+            else:
+                print("Tiling has not finished, restarting now.")
+                pass
+        elif (os.path.exists(outf_name)) & (len(return_dict) ==5):
+            # If temporary tif file exists, but tiling is not finished, only do tiling
+            print("Output file exists, skipping image generation for", proc_dt)
+            tif_id=''
+            pass
+        else:
+            pass
+else: 
+    # If pickle file doesn't exist, create it
+    with open(tmpdir+'return_dict'+proc_dt.strftime("%Y%m%d%H%M")+'.pkl','wb+') as f:
+        pass
+    # If pickle file doesn't exist, regenerate image just in case it's not complete
+    print("Cannot find file specifying which data has been used, so repeating image generation.")
+    job_name='gg_sev_fds'
+    fds_id = utils.submit_fds(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+    job_name='gg_sev_ioc'
+    ioc_id = utils.submit_ioc(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+    job_name='gg_hi8'
+    hi8_id = utils.submit_hi8(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+    job_name='gg_goes16'
+    g16_id = utils.submit_g16(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+    job_name='gg_goes18'
+    g18_id = utils.submit_g18(batch, job_name, proc_dt, queue, dirs, comp, vza_thresh_max)
+    ids = [fds_id, ioc_id, hi8_id, g16_id, g18_id]
+    job_name='gg_tif'
+    tif_id = utils.submit_tif(batch, job_name, outf_name, proc_dt, queue, dirs, vza_thresh_max, min_refl, max_refl, ids)
+     
+# Tiling   
+if batch:
+            job_name='gg_tiling'
+            cmdbatch = 'sbatch --job-name='+job_name \
+                +' -o '+logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.log' \
+                +' -e '+logdir+'/'+job_name+proc_dt.strftime("%H%M")+'.err' \
+                +' --mem=10G'+' -p '+queue \
+                +' --time=00:30:00'
+            if tif_id:
+                cmd = cmdbatch+ ' ' +'--dependency=afterany:'+tif_id
+            else:
+                cmd = cmdbatch
+            cmd = cmd+' '+pydir+'tiling.py' \
+                  + ' ' + '--outf_name='+ outf_name + ' ' + '--output_dir_rsg=' + output_dir_rsg +' ' \
+                  +'--zoomlevs='+zoomlevs + ' ' + '--tilesize=' + str(tilesize)
+            out = subprocess.check_output(cmd.split(' '), universal_newlines=True)
+            m = re.search('Submitted batch job (?P<ID>\d+)',out)
+            tile_id = m.group('ID')
+            print('Tiling processing job submitted with ID: ',tile_id) 
+        
 else:
-    print("Output tiles exist, skipping tile generation for ", proc_dt)
+            cmd = 'python'
+            cmd =cmd+' '+pydir+'tiling.py' \
+                  + ' ' + '--outf_name='+ outf_name + ' ' + '--output_dir_rsg=' + output_dir_rsg +' ' \
+                  +' '+'--zoomlevs='+zoomlevs + ' ' + '--tilesize=' + str(tilesize)
+            os.system(cmd)
 
 
-# finally, try moving the files
-#if not os.path.exists(output_dir_rsg):
- #   print("Moving to RSGNCEO")
- #   subprocess.call(rsync_opts)
- #   shutil.rmtree(outdir_tiles)
-#else:
-#    print("Files already exist at RSGNCEO, not moving.")
+### END OF PROCESSING ###

@@ -165,7 +165,7 @@ if os.path.exists(tmpdir+"return_dict"+proc_dt.strftime("%Y%m%d%H%M")+".pkl"):
         # All the data has been processed and is in the pickle file
         if os.path.exists(output_dir_rsg):
             # If final output tiles all exist, no need to do any reprocessing
-            print("Output files already exist on RSGNCEO. Not processing.")
+            print("Output files already exist on RSGNCEO.")
             my_objects = [] 
             try:
                 with open(tmpdir+'return_dict'+proc_dt.strftime("%Y%m%d%H%M")+'.pkl', 'rb') as f:
@@ -191,6 +191,7 @@ if os.path.exists(tmpdir+"return_dict"+proc_dt.strftime("%Y%m%d%H%M")+".pkl"):
                 quit()
             else:
                 print("Tiling has not finished, restarting now.")
+                tif_id=''
                 pass
         elif (os.path.exists(outf_name)) & (len(return_dict) ==5):
             # If temporary tif file exists, but tiling is not finished, only do tiling

@@ -33,7 +33,7 @@ else
 
 fi
 
-logdir=/work/scratch-nopw2/$USER/global_geo/Year/Month/Day
+logdir=/work/scratch-nopw2/$USER/global_geo/$Year/$Month/$Day
 
 python Global_GEO.py --outdir_top=$outdir_top --idir_top=$idir_top --tmpdir=$tmpdir --cachedir=$cachedir --logdir=$logdir --pydir=$pydir --XRIT_Decompress_path=$XRIT_Decompress_path $dtstr
 echo Waiting 20 mins..

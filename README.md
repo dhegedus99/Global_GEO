@@ -30,11 +30,18 @@ Note:
 - Make sure the path given for the xRITCompress binary in run_geo is
   the same as in the Makefile (line 24)
 
-To run the global_geo processing, run: 
-```./run_geo```
+To run the global_geo processing in NRT, edit the directories as needed and run: 
+```bash batch_scheduling.sh```
 
 By default, the script will process the most recent suitable timeslot
 (hourly, due to SEVIRI license restrictions imposed on the RSG
-group). To process older data, instead specify the desired timeslot by 
-editing the ```dtstr``` variable in run_geo, where the timeslot is in 
-YYYYmmddHHMM format.
+group). 
+
+To fill in missing data from yesterday, edit the directories as needed and run:
+```bash fill_in_yesterday.sh /path/to/cesium/images/```
+
+To process older data, instead specify the desired timeslot by 
+running:
+```bash fill_in_any_hour.sh YYYYMMDDHHMM```
+or
+```bash fill_in_any_day.sh /path/to/cesium/images/ YYYYMMDD```
